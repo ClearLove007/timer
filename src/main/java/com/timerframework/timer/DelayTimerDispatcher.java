@@ -57,32 +57,36 @@ public class DelayTimerDispatcher {
     /**
      * redis key
      */
-    public static String EVENT_KEY = "delay-event-key";
+    @Value("${timer.event.redis.key-prex:delay-event-key}")
+    public static String eventKey;
 
     /**
      * 最小睡眠时间 ms
      */
-    private static final long MIN_SLEEP_TIME_IN_MS = 1L;
+    private long minSleepInMs = 1L;
 
     /**
      * 最大睡眠时间 ms
      */
-    private static final long MAX_SLEEP_TIME_IN_MS = 3000L;
+    private long maxSleepInMs = 3000L;
 
     /**
-     *
+     * 恢复事件提交最大超时时间
      */
-    private static final long OVER_TIME_DELAY = 100L;
+    @Value("${timer.event.restore.over-time:100}")
+    private Long overTimeDelay;
 
     /**
      * 最大恢复重试次数
      */
-    private static final int MAX_RESTORE_RETRY = 5;
+    @Value("${timer.event.restore.retryTimes:5}")
+    private Integer maxRetryTimes;
 
     /**
-     * redis批量大小
+     * redis批量大小 (大小为1时不会出现因为异常而重复提交已提交过的event)
      */
-    private static final int REDIS_BATCH_SIZE = 100;
+    @Value("${timer.event.restore.numberOfOneTime:100}")
+    private int redisBatchSize;
 
     private final Gson gson;
 
@@ -106,7 +110,7 @@ public class DelayTimerDispatcher {
     public <T> String submit(DelayEvent<T> event) {
         try {
             log.debug("New event received {}", event);
-            redisTemplate.opsForHash().put(EVENT_KEY, event.getId(), gson.toJson(event));
+            redisTemplate.opsForHash().put(eventKey, event.getId(), gson.toJson(event));
             timer.newTimeout(new TimerTaskWorker(event.getId()), event.getDelay(), event.getTimeUnit());
         } catch (Exception var3) {
             log.error("Error while submit task :" + event, var3);
@@ -123,14 +127,14 @@ public class DelayTimerDispatcher {
      * @param <T>
      */
     protected <T> void restoreEvents(Collection<String> eventIds) {
-        List<List<String>> eventIdsGroup = Lists.partition(Lists.newArrayList(eventIds), 100);
+        List<List<String>> eventIdsGroup = Lists.partition(Lists.newArrayList(eventIds), redisBatchSize);
         eventIdsGroup.forEach((eIds) -> {
-            int i = 0;
+            int retryTimes = 0;
 
-            while (i < 5) {
+            while (retryTimes < maxRetryTimes) {
                 try {
-                    List<String> eventStrings = redisTemplate.opsForHash().multiGet(EVENT_KEY, eIds);
-                    eventStrings.parallelStream().filter((s) -> {
+                    List<String> eventStrings = redisTemplate.opsForHash().multiGet(eventKey, eIds);
+                    eventStrings.stream().filter((s) -> {
                         return s != null;
                     }).forEach((e) -> {
                         DelayEvent<?> tmpEvent = (DelayEvent) gson.fromJson(e, DelayEvent.class);
@@ -138,7 +142,7 @@ public class DelayTimerDispatcher {
                             DelayEvent<?> event = (DelayEvent) gson.fromJson(e, ((DelayWorker) workerMap.get(tmpEvent.getWorkerClazz())).getTypeToken().getType());
                             long newDelay = event.getCreateTime() + event.getTimeUnit().toMillis(event.getDelay()) - System.currentTimeMillis();
                             log.info("Restore event {} with new delay {} ms", event, newDelay);
-                            event.setDelay(newDelay > 0L ? newDelay : 100L);
+                            event.setDelay(newDelay > 0L ? newDelay : overTimeDelay);
                             event.setTimeUnit(TimeUnit.MILLISECONDS);
                             event.setCreateTime(System.currentTimeMillis());
                             submit(event);
@@ -148,17 +152,17 @@ public class DelayTimerDispatcher {
 
                     });
                     break;
-                } catch (Exception var6) {
-                    log.error("Can't restore events with : " + eIds, var6);
-                    log.warn("Cant' restore {} with retry {} fail {}", new Object[]{eIds, i, var6.getMessage()});
+                } catch (Exception e) {
+                    log.error("Can't restore events with : " + eIds, e);
+                    log.warn("Cant' restore {} with retry {} fail {}", new Object[]{eIds, retryTimes, e.getMessage()});
 
                     try {
-                        TimeUnit.MILLISECONDS.sleep(RandomUtils.nextLong(1L, 3000L));
+                        TimeUnit.MILLISECONDS.sleep(RandomUtils.nextLong(minSleepInMs, maxSleepInMs));
                     } catch (InterruptedException var5) {
                         Thread.currentThread().interrupt();
                     }
 
-                    ++i;
+                    ++retryTimes;
                 }
             }
 
@@ -171,7 +175,7 @@ public class DelayTimerDispatcher {
      * @param eventId
      */
     public void cancel(String eventId) {
-        redisTemplate.opsForHash().delete(EVENT_KEY, new String[]{eventId});
+        redisTemplate.opsForHash().delete(eventKey, new String[]{eventId});
     }
 
     @PostConstruct
@@ -180,11 +184,11 @@ public class DelayTimerDispatcher {
         workerMap = (Map)applicationContext.getBeansOfType(DelayWorker.class).values().stream().collect(Collectors.toMap((w) -> {
             return w.getClass().getName();
         }, Function.identity()));
-        EVENT_KEY = app + EVENT_KEY;
+        eventKey = app + eventKey;
         if (!CollectionUtils.isEmpty(workerMap)) {
-            Set<String> eventIds = redisTemplate.opsForHash().keys(EVENT_KEY);
+            Set<String> eventIds = redisTemplate.opsForHash().keys(eventKey);
             log.info("Restore events with ids {}", eventIds);
-            if (eventIds != null) {
+            if (!CollectionUtils.isEmpty(eventIds)) {
                 restoreExecutorService.execute(() -> {
                     restoreEvents(eventIds);
                 });
@@ -206,8 +210,8 @@ public class DelayTimerDispatcher {
         while(!restoreExecutorService.isTerminated()) {
             try {
                 restoreExecutorService.awaitTermination(10L, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException var2) {
-                log.error("Can't gracefuly stop", var2);
+            } catch (InterruptedException e) {
+                log.error("Can't gracefuly stop", e);
             }
         }
 
@@ -236,9 +240,9 @@ public class DelayTimerDispatcher {
         @Override
         public void run(Timeout timeout) throws Exception {
             boolean seize = false;
-            if (redisTemplate.opsForHash().hasKey(EVENT_KEY, eventId)) {
+            if (redisTemplate.opsForHash().hasKey(eventKey, eventId)) {
                 log.info("Event with id {} still in queue, try to seize execution right.", eventId);
-                String eventJson = (String) redisTemplate.opsForHash().get(EVENT_KEY, eventId);
+                String eventJson = (String) redisTemplate.opsForHash().get(eventKey, eventId);
                 DelayEvent<?> event = (DelayEvent) gson.fromJson(eventJson, DelayEvent.class);
                 if (workerMap.containsKey(event.getWorkerClazz())) {
                     event = (DelayEvent) gson.fromJson(eventJson, ((DelayWorker) workerMap.get(event.getWorkerClazz())).getTypeToken().getType());
@@ -275,7 +279,7 @@ public class DelayTimerDispatcher {
          * 清除event信息
          */
         private void clearEventInfo() {
-            redisTemplate.opsForHash().delete(EVENT_KEY, new String[]{eventId});
+            redisTemplate.opsForHash().delete(eventKey, new String[]{eventId});
             redisTemplate.delete(getEventLockKey());
         }
 

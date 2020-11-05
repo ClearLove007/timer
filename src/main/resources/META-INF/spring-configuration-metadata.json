@@ -5,6 +5,26 @@
 	  "type": "java.lang.Boolean",
 	  "description": "switch of enable timer",
 	  "defaultValue": false
+	},{
+	  "name": "timer.event.restore.numberOfOneTime",
+	  "type": "java.lang.Integer",
+	  "description": "恢复事件时每次从redis获取事件数量的大小",
+	  "defaultValue": 100
+	},{
+	  "name": "timer.event.redis.key-prex",
+	  "type": "java.lang.String",
+	  "description": "redis prex-Key",
+	  "defaultValue": "delay-event-key"
+	},{
+	  "name": "timer.event.restore.over-time",
+	  "type": "java.lang.Long",
+	  "description": "恢复事件提交最大超时时间",
+	  "defaultValue": 100
+	},{
+	  "name": "timer.event.restore.retryTimes",
+	  "type": "java.lang.Integer",
+	  "description": "最大恢复重试次数",
+	  "defaultValue": 5
 	}
   ]
 }
