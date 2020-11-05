@@ -1,0 +1,10 @@
+{
+  "properties": [
+	{
+	  "name": "timer.enable",
+	  "type": "java.lang.Boolean",
+	  "description": "switch of enable timer",
+	  "defaultValue": false
+	}
+  ]
+}
