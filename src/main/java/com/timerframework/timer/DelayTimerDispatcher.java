@@ -48,7 +48,7 @@ public class DelayTimerDispatcher {
     @Autowired
     private ApplicationContext applicationContext;
 
-    @Value("${spring.application.name}")
+    @Value("${spring.application.name:timer-service-}")
     private String app;
 
     @Autowired
